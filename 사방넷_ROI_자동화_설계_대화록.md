@@ -334,17 +334,128 @@ roi-automation/
 
 ---
 
-### 🔲 대기 중: rawdata 시트 처리
+### ✅ 완료: 사방넷 Selenium 자동 수집 + 전체 가공 처리
 
-사방넷 주문확인처리 rawdata 파일 수령 후 진행 예정.
+**구현 파일:** `roi_dashboard/process_gagang.py`
 
-**처리 로직 (예정):**
-- 주문번호 + 송장번호 기준 세트 주문 묶기 → 2번째 행부터 매출·배송비 = 0
-- 기준 시트의 채널상품코드 ↔ rawdata 채널코드 매핑 (ESM은 앞 10자리)
-- rawdata 시트에 주차별 append (중복 방지)
+#### 처리 흐름
+
+```
+사방넷 로그인 (Selenium) → 주문확인처리 Excel 다운로드
+→ rawdata 파싱 (39컬럼 고정 포맷)
+→ 기준 시트 매핑 (채널상품코드 → 브랜드/SKU명/원가/수수료)
+→ 공헌이익 계산
+→ Google Sheets '전체 가공' 시트에 주차별 append (중복 방지)
+```
+
+#### 핵심 설계 결정
+
+| 항목 | 결정 |
+|------|------|
+| 세트 주문 처리 | 송장번호 기준 묶기, 2번째 행부터 매출·배송비 = 0 |
+| ESM 채널코드 매핑 | 채널상품코드 앞 10자리로 exact_map 조회 |
+| 중복 방지 | 기존 시트의 송장번호 set 로드 후 신규만 append |
+| 주차 기준 | 해당 월 첫 수요일이 속한 주 = 1주차 |
+
+#### 전체 가공 시트 컬럼 구조 (GAGANG_HEADERS)
+
+```
+날짜 | 월 | 주차 | 송장번호 | 채널명 | 채널상품코드 | 옵션바코드
+브랜드 | SKU명 | 주문수량 | 매출 | 원가 | 수수료 | 실제 부과 배송
+공헌이익 | 광고비
+```
+
+**결과:** 2026년 1월~5월 3주차 데이터 → 23,100행 Google Sheets 업로드 완료
 
 ---
 
-### 🔲 미착수: 광고비 시트 / 피봇 요약 / 시각화
+### ✅ 완료: 브랜드/SKU명 공란 패치
+
+**구현 파일:** `roi_dashboard/patch_gagang.py`
+
+기준 시트에 별칭(SKU명) 수기 입력 후 전체 가공 시트의 공란 셀만 일괄 채우기.
+
+#### 핵심 로직
+
+```python
+# 공란 필드만 업데이트 — 기존 값 절대 수정 안 함
+if not brand and new_brand:
+    updates.append({'range': f'H{sheet_row}', 'values': [[new_brand]]})
+if not sku_name and new_sku:
+    updates.append({'range': f'I{sheet_row}', 'values': [[new_sku]]})
+```
+
+- exact_map: 채널상품코드 완전 일치
+- esm_map: ESM/지마켓/옥션 채널은 앞 10자리 prefix 매칭
+
+**결과:** 23,100행 중 210개 셀 업데이트 (브랜드/SKU명 공란만)
+
+---
+
+### ✅ 완료: Google Sheets 피봇 대시보드
+
+**구현 파일:** `roi_dashboard/create_sheets_pivot.py`
+
+#### 생성 시트 3개
+
+| 시트명 | 내용 |
+|--------|------|
+| 피봇 대시보드 | 채널별/브랜드별/SKU별 정적 컬러 피봇 + KPI 카드 |
+| 데이터 원본 | 채널×브랜드×SKU×월×주차 집계 raw 데이터 |
+| 채널×브랜드×SKU 피봇 | Google Sheets 네이티브 편집 가능 피봇 |
+
+#### 필터/정규화 기준
+
+```python
+EXCLUDE_CHANNELS   = ['쿠팡', '화해']       # 완전 제외
+INVALID_CHAN_NAMES = ['프로뉴트리션', '하우스윗']  # 채널명 오류 제거
+# 채널명 정규화: 'ESM지마켓(housweet23)' → 'ESM지마켓'
+df['채널명'] = df['채널명'].str.replace(r'\s*\([^)]*\)', '', regex=True)
+```
+
+#### 네이티브 피봇 컬럼 레이아웃
+
+```
+A(0)=채널명  B(1)=브랜드  C(2)=SKU명  D(3)=월  E(4)=주차
+F(5)=매출   G(6)=공헌이익  H(7)=공헌이익율  I(8)=광고비  J(9)=광고비율
+```
+
+- 공헌이익율/광고비율: `PivotValue.formula` + `summarizeFunction: CUSTOM` (집계 레벨 수식)
+- 컬러 구분: 채널명(blue-100) / 브랜드(blue-50) / SKU명(slate-50) / 월(green-100) / 주차(green-50)
+- 시트 위치: 삭제 전 index 저장 → 재생성 후 복원 (`updateSheetProperties`)
+
+---
+
+### ✅ 완료: HTML 대시보드 업데이트
+
+**구현 파일:** `roi_dashboard/create_dashboard.py`
+
+- 쿠팡/화해 제외, 채널명 정규화 (create_sheets_pivot.py 와 동일 기준)
+- 광고비 KPI 카드 추가 (amber 색상)
+- 헤더 subtitle: 동적 기간 + 제외 채널 표시
+
+---
+
+## 📁 최종 파일 구조
+
+```
+roi_dashboard/
+├── credentials.json              # Google API 서비스 계정
+├── create_reference_sheet.py     # 기준 시트 생성 (1회성)
+├── process_gagang.py             # 사방넷 수집 + 전체 가공 append (주 1회)
+├── patch_gagang.py               # 브랜드/SKU명 공란 패치 (필요 시)
+├── create_sheets_pivot.py        # Google Sheets 피봇 대시보드 생성
+├── create_dashboard.py           # HTML 대시보드 생성
+└── 사방넷_ROI_자동화_설계_대화록.md
+```
+
+## 🔄 주 1회 실행 순서
+
+```bash
+python process_gagang.py        # 사방넷 수집 + 전체 가공 업데이트
+python patch_gagang.py          # 공란 브랜드/SKU명 보완 (필요 시)
+python create_sheets_pivot.py   # Sheets 피봇 갱신
+python create_dashboard.py      # HTML 대시보드 갱신
+```
 
 ---
