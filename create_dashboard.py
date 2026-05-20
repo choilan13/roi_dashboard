@@ -43,16 +43,44 @@ def load_data() -> pd.DataFrame:
     return df
 
 
+# ── 제외/정규화 설정 (create_sheets_pivot.py 와 동일 기준 유지) ────────────────
+EXCLUDE_CHANNELS   = ['쿠팡', '화해']
+INVALID_CHAN_NAMES = ['프로뉴트리션', '하우스윗']
+
+
 def preprocess(df: pd.DataFrame) -> pd.DataFrame:
-    for col in ['매출', '공헌이익', '원가', '수수료', '실제 부과 배송']:
+    for col in ['매출', '공헌이익', '원가', '수수료', '실제 부과 배송', '광고비']:
         if col in df.columns:
             df[col] = pd.to_numeric(
                 df[col].astype(str).str.replace(',', '').str.strip(),
                 errors='coerce'
             ).fillna(0)
+        else:
+            df[col] = 0
+
+    # 채널명 정규화: 'ESM지마켓(계정)' → 'ESM지마켓'
+    if '채널명' in df.columns:
+        df['채널명'] = df['채널명'].str.replace(r'\s*\([^)]*\)', '', regex=True).str.strip()
+
+    # 빈 값 처리
+    df['SKU명'] = df['SKU명'].replace('', '(미분류)').fillna('(미분류)')
+    df['브랜드'] = df['브랜드'].replace('', '(미분류)').fillna('(미분류)')
+    df['채널명'] = df['채널명'].replace('', '(미분류)').fillna('(미분류)')
+
+    # 제외 채널 필터 (contains)
+    pattern = '|'.join(EXCLUDE_CHANNELS)
+    df = df[~df['채널명'].str.contains(pattern, na=False)]
+
+    # 채널명 오류 제거 (브랜드명 혼입, exact match)
+    df = df[~df['채널명'].isin(INVALID_CHAN_NAMES)]
+
+    df = df.reset_index(drop=True)
 
     df['공헌이익율'] = np.where(
         df['매출'] != 0, df['공헌이익'] / df['매출'], np.nan
+    )
+    df['광고비율'] = np.where(
+        df['매출'] != 0, df['광고비'] / df['매출'], np.nan
     )
 
     def safe_int(s, pat):
@@ -65,10 +93,6 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     df['월주']   = df['월'] + ' ' + df['주차']
     df['월주_n'] = df['월_n'] * 10 + df['주차_n']
 
-    # 빈 SKU명 → "(미분류)"
-    df['SKU명'] = df['SKU명'].replace('', '(미분류)').fillna('(미분류)')
-    df['브랜드'] = df['브랜드'].replace('', '(미분류)').fillna('(미분류)')
-    df['채널명'] = df['채널명'].replace('', '(미분류)').fillna('(미분류)')
     return df
 
 
@@ -274,6 +298,8 @@ def build_dashboard(df: pd.DataFrame) -> Path:
     total_sales   = df['매출'].sum()
     total_contrib = df['공헌이익'].sum()
     total_rate    = total_contrib / total_sales if total_sales else 0
+    total_ad      = df['광고비'].sum()
+    total_ar      = total_ad / total_sales if total_sales else 0
 
     # 차트
     charts = [
@@ -305,12 +331,14 @@ def build_dashboard(df: pd.DataFrame) -> Path:
         return f'''<div class="kpi"><div class="kpi-label">{label}</div>
 <div class="kpi-value" {style}>{value}</div></div>'''
 
+    excl_note = ', '.join(EXCLUDE_CHANNELS + INVALID_CHAN_NAMES)
     kpi_row = (
         kpi_card('총 매출', krw(total_sales))
         + kpi_card('총 공헌이익', krw(total_contrib),
                    COLOR_GREEN if total_contrib >= 0 else COLOR_RED)
         + kpi_card('공헌이익율', pct(total_rate),
                    COLOR_GREEN if total_rate >= 0 else COLOR_RED)
+        + kpi_card('총 광고비', krw(total_ad), COLOR_AMBER)
         + kpi_card('채널 수', f'{df["채널명"].nunique()}개')
         + kpi_card('브랜드 수', f'{df["브랜드"].nunique()}개')
         + kpi_card('SKU 수', f'{df["SKU명"].nunique()}개')
@@ -349,7 +377,7 @@ header span{{font-size:.85rem;opacity:.65}}
 <body>
 <header>
   <h1>📊 ROI 대시보드 2026</h1>
-  <span>전체 가공 기준 · {len(df):,}건 · 1월 ~ 5월 3주</span>
+  <span>전체 가공 기준 · {len(df):,}건 · {df["월"].min()} ~ {df["월"].max()}  |  제외: {excl_note}</span>
 </header>
 <div class="kpi-row">{kpi_row}</div>
 <div class="tabs" style="padding-top:16px">
